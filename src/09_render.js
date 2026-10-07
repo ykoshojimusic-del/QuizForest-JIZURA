@@ -414,9 +414,12 @@ class Renderer {
       const D = J.FXE[ev.type];
       if (D && D.draw) {
         if (D.scratch) copy();
+        const clipArea = plan.qfEffectAreas?.[event.cutOwner];
+        if (clipArea) { ctx.save(); ctx.beginPath(); ctx.rect(clipArea.x*cw,clipArea.y*ch,clipArea.w*cw,clipArea.h*ch); ctx.clip(); }
         try {
           D.draw(ctx, ev, k, { cw, ch, S, sc, st, step: st2, t, scale, renderer: this, allowFilter, opt, tmp: (w, h) => this.ensure(this.tiny, w, h), tmp2: (w, h) => this.ensure(this.small2 || (this.small2 = mk(2, 2)), w, h) });
         } catch (e) { console.warn('fx', ev.type, e); }
+        finally { if (clipArea) ctx.restore(); }
         ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none'; ctx.imageSmoothingEnabled = true;
         J.drawCustomEvent?.(ctx,event,k,sc);continue;
       }

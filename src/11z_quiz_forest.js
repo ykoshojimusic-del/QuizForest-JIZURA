@@ -1,4 +1,4 @@
-/* Quiz Forest Phase 1: opt-in palette and stock-effect candidate policy.
+/* Quiz Forest Phases 1–2: opt-in palette, stock effects and central-character priority.
    Registries, parser, timing, AI and video export remain unchanged. */
 (() => {
 'use strict';
@@ -30,6 +30,25 @@ const whitelist = Object.freeze(Object.fromEntries(Object.entries({
 const sets = Object.fromEntries(Object.entries(whitelist).map(([g, ids]) => [g, new Set(ids)]));
 const themeIds = new Set(['pop', 'ballad', 'acoustic', 'cute', 'elegant', 'dreamy']);
 const active = project => project?.quizForestMode === true;
+// Derived from the existing QF flag, not persisted and never assigned to the
+// ordinary CENTER_AVOID / CENTER_FREE_ZONES globals.
+const safeRegion = Object.freeze({x: .31, y: .16, w: .38, h: .68});
+const safeZones = Object.freeze([
+  {id: 'left', zone: {x: .03, y: .06, w: .26, h: .88}, weight: 3, size: [.3, .5, .2]},
+  {id: 'right', zone: {x: .71, y: .06, w: .26, h: .88}, weight: 3, size: [.3, .5, .2]},
+  {id: 'top', zone: {x: .04, y: .035, w: .92, h: .105}, weight: .3, size: [.2, .5, .3]},
+  {id: 'bottom', zone: {x: .04, y: .86, w: .92, h: .105}, weight: .3, size: [.2, .5, .3]},
+].map(z => Object.freeze({...z, zone: Object.freeze(z.zone), size: Object.freeze(z.size)})));
+const safety = Object.freeze({region: safeRegion, zones: safeZones});
+let legacyPlacementPass = 0;
+const safeAreaSettings = project => active(project) && !legacyPlacementPass ? safety : null;
+const keepPlacement = (project, cut) => {
+  const line = project.overrides?.[cut.line], options = project.lyricCutOptions?.[`${cut.line}:${cut.part}`];
+  // An automatic cache is not a user edit. Explicit sizes keep the existing
+  // notation rules, including when too large to fit in the side strips.
+  return !!(line?.lock || line?.area || line?.layout || cut.lyricSize != null
+    || options?.pastedEffects || options?.details && Object.keys(options.details).length);
+};
 // Fonts are not effect candidates; every effect group/ID is default-deny in QF.
 const allowed = (project, group, id) => !active(project) || group === 'font' || sets[group]?.has(id) === true;
 // Existing data has no manual/automatic provenance. Conservatively protect any
@@ -55,7 +74,8 @@ function restrictMedia(project, settings) {
   return settings;
 }
 const savedKeys = ['style', 'mood', 'themes', 'themeBalance', 'colors', 'colorTheme', 'fx', 'enabled', 'fonts'];
-J.quizForest = {palette, whitelist, active, allowed, colors, themeAllowed: (project, id) => !active(project) || themeIds.has(id),
+J.quizForest = {palette, whitelist, active, allowed, colors, safeAreaSettings, keepPlacement,
+  themeAllowed: (project, id) => !active(project) || themeIds.has(id),
   activate(project) {
     if (!active(project)) {
       project.quizForestPrevious = {values: clone(Object.fromEntries(savedKeys.map(k => [k, project[k]]))),
@@ -135,5 +155,39 @@ J.applyProjectSettings = (current, source) => {
     else delete result.quizForestPrevious;
   } else { delete result.quizForestMode; delete result.quizForestPrevious; }
   return result;
+};
+// Cut-owned automatic effects use the same existing display-area clip as the
+// lyric. Hand-edited/locked effects keep their original full-frame behaviour.
+const planLyrics = J.plan;
+J.plan = (project, ...args) => {
+  const plan = planLyrics(project, ...args);
+  if (legacyPlacementPass || !active(project) || !J.lyricEffectSettings(project).autoPlacement) return plan;
+  const protectedCuts = plan.cuts.filter(c => c.line >= 0 && Number.isInteger(c.part) && keepPlacement(project, c));
+  if (protectedCuts.length) {
+    // A hand-picked layout may belong to an arranged group without a saved area.
+    // Reuse the unmodified placement rules to recover its complete geometry;
+    // marking its initial per-cut area manual alone would break that arrangement.
+    let reference;
+    legacyPlacementPass++;
+    try { reference = planLyrics(project, ...args); } finally { legacyPlacementPass--; }
+    const previous = new Map(reference.cuts.map(c => [`${c.line}:${c.part}`, c]));
+    for (const cut of protectedCuts) {
+      const original = previous.get(`${cut.line}:${cut.part}`);
+      if (!original) continue;
+      for (const key of ['area', 'params', 'contentScale', 'arrangement', 'lyricPattern']) {
+        if (original[key] === undefined) delete cut[key]; else cut[key] = clone(original[key]);
+      }
+      cut.areaMode = cut.area ? 'manual' : original.areaMode;
+    }
+    // Automatic neighbours compose around these preserved areas. This reuses
+    // the existing manual-area/lock-aware group solver and never edits project data.
+    J.applyLyricGroupAvoidance(project, plan);
+  }
+  // A plan-only lookup, not event data: cached effects/favorites must not carry
+  // the QF clip into a normal-mode plan or a later explicit placement.
+  plan.qfEffectAreas = Object.fromEntries(plan.cuts
+    .filter(c => c.line >= 0 && Number.isInteger(c.part) && c.area && c.areaMode !== 'manual' && !keepPlacement(project, c))
+    .map(c => [`${c.line}:${c.part}`, {...c.area}]));
+  return plan;
 };
 })();

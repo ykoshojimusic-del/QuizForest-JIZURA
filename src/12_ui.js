@@ -3278,8 +3278,18 @@ function renderTech() {
   $('lyricAutoPlacement').checked = lyricEffects.autoPlacement;
   $('lyricAvoidForeground').checked = lyricEffects.avoidForeground;
   // 「画面中央を避ける」 (詳細 > 歌詞) and 「歌詞が画面中央を避ける」 (かんたん) are the same setting.
-  for (const input of document.querySelectorAll('.avoid-center-toggle')) input.checked = lyricEffects.avoidCenter && lyricEffects.autoPlacement;
-  $('lyricAvoidCenter').disabled = !lyricEffects.autoPlacement;
+  const qfSafety = J.quizForest.safeAreaSettings(S.project);
+  for (const input of document.querySelectorAll('.avoid-center-toggle')) {
+    input.checked = (lyricEffects.avoidCenter || !!qfSafety) && lyricEffects.autoPlacement;
+    input.disabled = !!qfSafety;
+    input.title = qfSafety ? J.mediaLabel('Quiz Forestの自動配置は中央キャラクターを避けます。手動配置は変更しません。', 'Quiz Forest automatic placement avoids the central character. Manual placement is preserved.') : '';
+    const note = input.closest('label')?.querySelector('small');
+    if (note && qfSafety) {
+      note.dataset.normalText ??= note.textContent;
+      note.textContent = J.mediaLabel('QFでは強調歌詞も中央キャラクターを避けます。手動配置は維持します。', 'In QF, automatic placement keeps even emphasised lyrics clear of the central character. Manual placement is preserved.');
+    } else if (note?.dataset.normalText) note.textContent = note.dataset.normalText;
+  }
+  $('lyricAvoidCenter').disabled = !lyricEffects.autoPlacement || !!qfSafety;
   $('lyricGroupAvoidanceStrength').value = lyricEffects.lyricAvoidanceStrength;
   $('lyricGroupAvoidanceStrengthValue').textContent = lyricEffects.lyricAvoidanceStrength.toFixed(2);
   $('lyricAvoidanceStrength').value = lyricEffects.avoidanceStrength;

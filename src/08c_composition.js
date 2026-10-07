@@ -103,8 +103,9 @@ J.CENTER_FREE_ZONES = [
   { id: 'topLeft', zone: { x: .03, y: .035, w: .46, h: .245 }, weight: .5, size: [.5, .5, 0] },
   { id: 'bottomRight', zone: { x: .51, y: .72, w: .46, h: .245 }, weight: .5, size: [.5, .5, 0] },
 ];
-J.pickSoloZone = (cut, { avoidCenter = false } = {}) => {
+J.pickSoloZone = (cut, { avoidCenter = false, safeArea = null } = {}) => {
   const rng = J.rng(J.h(J.placementSeed(cut), 893));
+  if (safeArea) return rng.wpick(safeArea.zones.map(z => [z, cut.suppressed && /^(top|bottom)$/.test(z.id) ? z.weight * .5 : z.weight]));
   if (avoidCenter && !cut.emphasis) return rng.wpick(J.CENTER_FREE_ZONES.map(z => [z, cut.suppressed && /^(top|bottom)$/.test(z.id) ? z.weight * .5 : z.weight]));
   return rng.wpick(J.SOLO_ZONES.map(z => [z, cut.emphasis ? EMPHASIS_ZONES[z.id] || 0 : cut.suppressed ? SUPPRESSED_ZONES[z.id] || 0 : z.weight]));
 };

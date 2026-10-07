@@ -254,7 +254,7 @@ const regionsFor = (env, hasEmphasis) => {
     push(stage, 'stage');
     if (env.zone) push(inter(env.zone, stage), 'zone', 1.5);
   } else {
-    if (hasEmphasis) push(stage, 'stage');
+    if (hasEmphasis && !env.hardAvoid) push(stage, 'stage');
     const free = freeRects(stage, obs);
     for (const r of free) push(r, 'free');
     // The lyric zone of the scene's composition comes first, wherever the obstacles leave it free.
@@ -302,6 +302,7 @@ J.composeLyricScene = (cuts, env = {}) => {
   const consider = (spec, fit, region, place) => {
     if (!fit) return;
     const rects = fit.rects, minFont = Math.min(...rects.map(r => r.font));
+    if (env.hardAvoid && rects.some(r => overlapArea(r, env.hardAvoid) > 1e-9)) return;
     // The roles must read: 強調 clearly larger and 抑制 clearly smaller than the ordinary lyrics (compared by
     // type size once the length factor is out), whatever composition or region each lyric ended up in.
     const rel = units.map((u, i) => rects[i].font / u.r0), plainRel = units.filter(u => u.cls === 'normal').map(u => rel[u.i]).sort((a, b) => a - b);
@@ -419,7 +420,7 @@ J.composeLyricScene = (cuts, env = {}) => {
   // let the lyrics lie over them, as little as possible (heavily penalised).
   if (!cands.some(c => c.minFont >= FRELAX)) {
     relaxed = true;
-    if (!regions.some(r => r.tag === 'stage')) regions.push({ rect: { x: MARGIN, y: MARGIN, w: 1 - 2 * MARGIN, h: 1 - 2 * MARGIN }, tag: 'stage', bonus: -.4 });
+    if (!env.hardAvoid && !regions.some(r => r.tag === 'stage')) regions.push({ rect: { x: MARGIN, y: MARGIN, w: 1 - 2 * MARGIN, h: 1 - 2 * MARGIN }, tag: 'stage', bonus: -.4 });
     explore();
   }
   // Placement variants for the promising candidates.

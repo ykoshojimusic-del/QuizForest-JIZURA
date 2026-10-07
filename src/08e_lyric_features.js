@@ -148,8 +148,9 @@ J.autoLyricArea = (cut, plan, obstacles = [], settings = J.lyricEffectSettings({
   const rng = J.rng(J.h(J.placementSeed ? J.placementSeed(cut) : cut.seed, 947));
   delete cut.lyricPattern;
   // 「画面中央を避ける」 keeps the stage centre clear like an obstacle; *emphasis* may still use it.
-  const avoidCenter = settings.avoidCenter && !cut.emphasis && J.CENTER_AVOID;
-  const blockers = avoidCenter ? [...obstacles, J.CENTER_AVOID] : obstacles;
+  const safeArea = context.safeArea;
+  const avoidCenter = safeArea?.region || settings.avoidCenter && !cut.emphasis && J.CENTER_AVOID;
+  const blockers = avoidCenter ? [...obstacles, avoidCenter] : obstacles;
   if(cut.lyricSize != null){
     const size=Math.max(.04,cut.lyricSize/100),candidates=[];
     // The notation fixes the size; only the position is composed.
@@ -164,24 +165,24 @@ J.autoLyricArea = (cut, plan, obstacles = [], settings = J.lyricEffectSettings({
     return rng.pick(candidates.filter(c=>c.score<=best+1e-8)).r;
   }
   const portrait = plan.W < plan.H;
-  if (cut.emphasis && context.fgCenter) return emphasisOverForeground(cut, plan, context, rng);
+  if (cut.emphasis && context.fgCenter && !safeArea) return emphasisOverForeground(cut, plan, context, rng);
   let w = cut.emphasis ? rng.range(.82, .95) : cut.suppressed ? rng.range(.34, .46) : rng.range(.48, .72);
   let h = cut.emphasis ? rng.range(.7, .92) : cut.suppressed ? rng.range(.24, .34) : rng.range(.4, .62);
   if (portrait && !cut.emphasis) { w = Math.min(.9, w * 1.2); h *= .8; }
   // Size contrast comes from the placement pattern: a lyric-only zone, or the composition zone's size.
-  const solo = !obstacles.length && !context.zone && J.pickSoloZone ? J.pickSoloZone(cut, { avoidCenter: !!avoidCenter }) : null;
-  const zone = context.zone || solo?.zone, room = zone ? zone.w * zone.h : 1;
+  const solo = (safeArea || !obstacles.length && !context.zone) && J.pickSoloZone ? J.pickSoloZone(cut, { avoidCenter: !!avoidCenter, safeArea }) : null;
+  const zone = safeArea ? solo?.zone : context.zone || solo?.zone, room = zone ? zone.w * zone.h : 1;
   const weights = solo?.size || (room < .12 ? [.7, .3, 0] : room < .3 ? [.35, .5, .15] : undefined);
   const scale = J.lyricSizeScale ? J.lyricSizeScale(cut, rng, weights) : 1;
   const fitScale = Math.min(scale, .94 / w, .94 / h);// large classes still keep the 3% margins
   w = Math.max(.04, w * fitScale); h = Math.max(.04, h * fitScale);
   // A strip beside the kept-clear centre: fit the area to the strip instead of shrinking it uniformly.
   if (avoidCenter && solo) { w = Math.min(w, solo.zone.w); h = Math.min(h, solo.zone.h); }
-  const minSize = cut.suppressed ? J.SUPPRESSED_MIN_AREA : null;
+  const minSize = cut.suppressed ? (safeArea ? {w: Math.min(J.SUPPRESSED_MIN_AREA.w, zone.w), h: Math.min(J.SUPPRESSED_MIN_AREA.h, zone.h)} : J.SUPPRESSED_MIN_AREA) : null;
   if (minSize) { w = Math.max(w, minSize.w); h = Math.max(h, minSize.h); }
   // Designed placement: aligned anchors scored for the scene's composition zone, the foreground and balance.
   // Emphasis keeps its size rather than shrinking into the zone.
-  const composed = J.composeLyricArea?.(cut, { w, h, obstacles: blockers, zone, fgCenter: context.fgCenter, fixedSize: !!cut.emphasis && !obstacles.length, minSize });
+  const composed = J.composeLyricArea?.(cut, { w, h, obstacles: blockers, zone, fgCenter: context.fgCenter, fixedSize: !!cut.emphasis && !obstacles.length && !safeArea, minSize });
   if (composed) return composed;
   let regions = emptyRegions(blockers);
   // A suppressed lyric keeps its minimum size: with no free region that large it takes the least covered
@@ -213,8 +214,11 @@ J.autoLyricArea = (cut, plan, obstacles = [], settings = J.lyricEffectSettings({
       candidates.push({ r, score: score(r) + .001 * (w * h - cw * ch) });
     }
   }
-  const min = Math.min(...candidates.map(c => c.score));
-  return rng.pick(candidates.filter(c => c.score <= min + 1e-8)).r;
+  // QF's character region is a hard constraint for automatic candidates even
+  // when the foreground fills the stage; other obstacles remain preferences.
+  const eligible = safeArea ? candidates.filter(c => overlap(c.r, safeArea.region) <= 1e-9) : candidates;
+  const min = Math.min(...eligible.map(c => c.score));
+  return rng.pick(eligible.filter(c => c.score <= min + 1e-8)).r;
 };
 
 J.finishLyricPlan = (project, plan, audio) => {
@@ -235,6 +239,7 @@ J.finishLyricPlan = (project, plan, audio) => {
     }
   }
   const settings = J.lyricEffectSettings(project);
+  const safeArea = J.quizForest?.safeAreaSettings(project);
   // The foreground's composition guides lyric placement; avoidance additionally turns it into obstacles.
   const foreground = settings.autoPlacement && J.planMedia
     ? J.planMedia(project, plan, audio?.duration, 'foreground') : null;
@@ -268,8 +273,9 @@ J.finishLyricPlan = (project, plan, audio) => {
         ...bounds.filter(({ cut: f, box }) => box && f.start < cut.end && f.end + .6 > cut.start).map(({ box }) => padded(box)),
         ...bgScenes.filter(b => b.start < cut.end && b.end + .6 > cut.start).flatMap(b => b.boxes).map(padded),
       ];
-      cut.area = J.autoLyricArea(cut, plan, obstacles, settings, scene);
-      cut.areaMode = 'auto';
+      const keepPlacement = safeArea && J.quizForest.keepPlacement(project, cut);
+      cut.area = J.autoLyricArea(cut, plan, obstacles, settings, {...scene, safeArea: keepPlacement ? null : safeArea});
+      cut.areaMode = keepPlacement ? 'manual' : 'auto';
     }
     // An automatic area already carries the strength; the text scale is for the full-stage default.
     if (cut.area && (cut.emphasis && cut.contentScale === J.EMPHASIS_TEXT_SCALE || cut.suppressed && cut.contentScale === J.SUPPRESSED_TEXT_SCALE)) cut.contentScale = 1;
@@ -305,6 +311,8 @@ J.finishLyricPlan = (project, plan, audio) => {
 // Pack rotated display areas rather than stretching text or changing timeline times.
 J.applyLyricGroupAvoidance = (project, plan) => {
   const settings=J.lyricEffectSettings(project),strength=settings.lyricAvoidanceStrength;
+  const safeArea=settings.autoPlacement && J.quizForest?.safeAreaSettings(project);
+  const centerRegion=safeArea?.region || settings.autoPlacement&&settings.avoidCenter&&J.CENTER_AVOID;
   const groups=new Map(),shared=new Map();
   for(const cut of plan.cuts)if(cut.group!=null && Number.isInteger(cut.part) && !cut.effectsOnly){
     const into=cut.avoidOverlap?groups:shared;
@@ -338,13 +346,16 @@ J.applyLyricGroupAvoidance = (project, plan) => {
       for(const b of bgScenes)if(b.start<end&&b.end>start)for(const box of b.boxes)obstacles.push(grown(box,settings.avoidanceStrength));
     }
     for(const c of cuts)if(fixedCut(c)&&c.area)obstacles.push(c.area);
-    if(settings.autoPlacement&&settings.avoidCenter&&J.CENTER_AVOID)obstacles.push(J.CENTER_AVOID);
+    if(centerRegion)obstacles.push(centerRegion);
     const scene=J.lyricScene?J.lyricScene(cuts[0],fgBounds,end,bgScenes):{};
-    const result=J.composeLyricScene(free,{aspect:plan.W/plan.H,seed:J.placementSeed?J.placementSeed(cuts[0]):cuts[0].seed,maxOverlap,obstacles,zone:scene.zone,center:scene.fgCenter});
+    const result=J.composeLyricScene(free,{aspect:plan.W/plan.H,seed:J.placementSeed?J.placementSeed(cuts[0]):cuts[0].seed,maxOverlap,obstacles,zone:scene.zone,center:scene.fgCenter,hardAvoid:safeArea?.region});
     return result&&{...result,cuts:free};
   };
   const assign=(cut,area,mode)=>{
     if(project.overrides?.[cut.line]?.lock)return;// locked lines keep their area
+    // Blending between a safe left and safe right arrangement can pass through
+    // the middle. Keep the existing safe area in that case instead of crossing.
+    if(safeArea && overlap(area,safeArea.region)>1e-9)return;
     cut.area=area;cut.areaMode=mode;
     if(cut.emphasis&&cut.contentScale===J.EMPHASIS_TEXT_SCALE||cut.suppressed&&cut.contentScale===J.SUPPRESSED_TEXT_SCALE)cut.contentScale=1;
     const layout=J.LAYOUTS[cut.layout];
@@ -395,7 +406,7 @@ J.applyLyricGroupAvoidance = (project, plan) => {
       const w=box.w*settings.avoidanceStrength,h=box.h*settings.avoidanceStrength;
       obstacles.push({x:box.x+box.w/2-w/2,y:box.y+box.h/2-h/2,w,h});
     }
-    if(settings.autoPlacement&&settings.avoidCenter&&J.CENTER_AVOID)obstacles.push(J.CENTER_AVOID);
+    if(centerRegion)obstacles.push(centerRegion);
     let regions=emptyRegions(obstacles);if(!regions.length)regions=[{x:.025,y:.025,w:.95,h:.95}];
     // Free space inside the scene's composition zone comes first (a 20% edge when comparing fits).
     const zone=J.lyricScene?(J.lyricScene(cuts[0],fgBounds,cuts.at(-1).displayEnd,bgScenes).zone):null;
