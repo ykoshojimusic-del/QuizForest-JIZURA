@@ -1011,7 +1011,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
           <button id="btnRemoveAudio" class="ghost" type="button" hidden>Remove audio</button>
           <button id="btnTap" title="Tap at the start of each line while the song plays">Tap to sync</button>
         </div>
-        <div class="theme-settings"><button id="btnThemes" type="button">Theme settings</button><div id="themeLabels" aria-live="polite"></div></div>
+        <div class="theme-settings"><button id="btnThemes" type="button">Theme settings</button><button id="btnQuizForest" type="button" aria-pressed="false">Quiz Forest</button><button id="btnQuizForestOff" type="button" hidden>通常モード</button><div id="themeLabels" aria-live="polite"></div></div>
         <div class="fields pro-only">
           <label class="field">BPM<input id="bpm" type="number" min="0" max="300" step="0.1" placeholder="Auto"></label>
           <label class="field">Start (s)<input id="offset" type="number" min="0" step="0.05"></label>
@@ -41880,6 +41880,146 @@ class ShortFrameRenderer {
 J.ShortFrameRenderer=ShortFrameRenderer;
 })();
 
+/* Quiz Forest Phase 1: opt-in palette and stock-effect candidate policy.
+   Registries, parser, timing, AI and video export remain unchanged. */
+(() => {
+'use strict';
+const clone = value => JSON.parse(JSON.stringify(value));
+const palette = Object.freeze({
+  skyBlue: '#8ED8FF', pink: '#FF8FB8', yellow: '#FFD85A', milkyWhite: '#FFFDF6',
+  cream: '#FFF0C9', lavender: '#B9A7FF', mintGreen: '#8EDDB4', darkNavy: '#31405F',
+});
+// Explicit stock IDs, not mood tags or substring guesses. Unknown/custom additions
+// stay outside the QF default pool until their visuals have been reviewed.
+const whitelist = Object.freeze(Object.fromEntries(Object.entries({
+  style: ['paper', 'magenta', 'rouge', 'mint', 'specimen'],
+  layout: ['center', 'mixed', 'labels', 'pill', 'bubble', 'lowerThird', 'arcTop', 'balloons', 'bounceLine', 'elastic', 'ribbon'],
+  enter: ['cut', 'pop', 'squashDrop', 'rubber', 'springIn', 'stickerPeel', 'bubbles', 'slideWhole', 'riseMask', 'fadeStagger'],
+  hold: ['still', 'float', 'breathe', 'sway', 'jelly', 'drift', 'orbitSmall', 'shimmer'],
+  exit: ['cut', 'shrink', 'drift', 'squash', 'peelOff', 'bounceOff', 'balloonOff', 'dissolve'],
+  decor: ['heartsStars', 'twinkle', 'confetti', 'musicNotes', 'cloudPuffs', 'bubbles', 'lightLeak', 'bokeh', 'starField', 'polkaPatch'],
+  treat: ['none', 'outlineFill', 'softShadow', 'glow', 'sticker', 'gradientV', 'rainbow'],
+  bg: ['none', 'cloudLayers', 'bokehBg', 'polka', 'meshBlobs', 'gradientSweep'],
+  cam: ['push', 'pullOut', 'floatNoise', 'pendulumSway', 'jelly', 'bounce', 'dollyIn', 'driftDiag'],
+  fx: ['starGlint', 'lightSweep', 'ripple'],
+  trans: ['wipe', 'clockWipe', 'irisOpen'],
+  media: ['dissolve', 'drift', 'pop', 'swing', 'iris', 'pulse', 'beatBounce', 'beatBreathe', 'beatSpring', 'beatSquash', 'beatJelly', 'softBloom', 'lightLeak',
+    'enter_fade', 'exit_fade', 'enter_slide', 'exit_slide', 'enter_rise', 'exit_rise', 'enter_shrink', 'exit_shrink',
+    'enter_squeezeY', 'exit_squeezeY', 'enter_dropBounce', 'exit_dropBounce', 'enter_elasticZoom', 'exit_elasticZoom',
+    'enter_starIris', 'exit_starIris', 'enter_heartIris', 'exit_heartIris',
+    'cam_push', 'cam_pullOut', 'cam_floatNoise', 'cam_pendulumSway', 'cam_jelly', 'cam_bounce', 'cam_dollyIn', 'cam_driftDiag'],
+}).map(([group, ids]) => [group, Object.freeze(ids)])));
+const sets = Object.fromEntries(Object.entries(whitelist).map(([g, ids]) => [g, new Set(ids)]));
+const themeIds = new Set(['pop', 'ballad', 'acoustic', 'cute', 'elegant', 'dreamy']);
+const active = project => project?.quizForestMode === true;
+// Fonts are not effect candidates; every effect group/ID is default-deny in QF.
+const allowed = (project, group, id) => !active(project) || group === 'font' || sets[group]?.has(id) === true;
+// Existing data has no manual/automatic provenance. Conservatively protect any
+// non-default colour state, including stored values whose switches are off.
+const hasCustomColors = project => {
+  const defaults = {...J.defaultProject().colors, accentOn: false};
+  return Object.entries(project.colors || {}).some(([key, value]) => value != null && value !== defaults[key]);
+};
+const colors = (rnd = () => 0) => {
+  const accents = [palette.pink, palette.skyBlue, palette.yellow, palette.lavender, palette.mintGreen];
+  const i = Math.min(accents.length - 1, Math.max(0, Math.floor(rnd() * accents.length)));
+  return {enabled: true, accentOn: true, allSchemes: true, bg: palette.milkyWhite,
+    fg: palette.darkNavy, sub: palette.darkNavy, dim: palette.cream, accent: accents[i],
+    accent2: accents[(i + 2) % accents.length], ghostA: accents[(i + 1) % accents.length], ghostB: accents[(i + 3) % accents.length]};
+};
+const softFx = fx => ({...fx, motion: Math.min(fx?.motion ?? .55, .65), glitch: 0, chroma: 0, flash: false});
+function restrictMedia(project, settings) {
+  if (!active(project)) return settings;
+  settings.enabled = {...settings.enabled}; settings.decorEnabled = {...settings.decorEnabled};
+  for (const id of new Set([...Object.keys(J.MEDIA_TECH), ...Object.keys(settings.enabled)])) if (!allowed(project, 'media', id)) settings.enabled[id] = false;
+  for (const id of new Set([...J.order('decor'), ...Object.keys(settings.decorEnabled)])) if (!allowed(project, 'decor', id)) settings.decorEnabled[id] = false;
+  settings.motion = Math.min(settings.motion, .65);
+  return settings;
+}
+const savedKeys = ['style', 'mood', 'themes', 'themeBalance', 'colors', 'colorTheme', 'fx', 'enabled', 'fonts'];
+J.quizForest = {palette, whitelist, active, allowed, colors, themeAllowed: (project, id) => !active(project) || themeIds.has(id),
+  activate(project) {
+    if (!active(project)) {
+      project.quizForestPrevious = {values: clone(Object.fromEntries(savedKeys.map(k => [k, project[k]]))),
+        mediaEffects: Object.fromEntries(['media', 'foreground'].map(layer => [layer, clone(J.mediaEffectSettings(project, layer))]))};
+    }
+    project.quizForestMode = true;
+    project.style = 'paper'; project.mood = 'pop'; project.themes = ['cute'];
+    if (!hasCustomColors(project)) project.colors = colors();
+    project.fx = {...softFx(project.fx), texture: 0, decor: .25};
+    project.enabled = Object.fromEntries(J.GROUP_KEYS.map(group => [group,
+      Object.fromEntries(J.order(group).map(id => [id, allowed(project, group, id)]))]));
+    for (const layer of ['media', 'foreground']) project[layer].effects = restrictMedia(project, J.mediaEffectSettings(project, layer));
+    // No timing, content, cut overrides, placement, locks or output settings are touched.
+    return project;
+  },
+  deactivate(project) {
+    const previous = project.quizForestPrevious;
+    delete project.quizForestMode; delete project.quizForestPrevious;
+    if (previous?.values) Object.assign(project, clone(previous.values));
+    if (previous?.mediaEffects) for (const layer of ['media', 'foreground']) project[layer].effects = clone(previous.mediaEffects[layer]);
+    return project;
+  },
+};
+const randomOk = J.randomOk;
+J.randomOk = (project, group, id) => allowed(project, group, id) && randomOk(project, group, id);
+const mediaSettings = J.mediaEffectSettings;
+J.mediaEffectSettings = (project, layer) => restrictMedia(project, mediaSettings(project, layer));
+const randomMediaSettings = J.randomMediaEffectSettings;
+J.randomMediaEffectSettings = (project, layer, rnd) => {
+  const settings = restrictMedia(project, randomMediaSettings(project, layer, rnd));
+  if (active(project) && !Object.entries(settings.enabled).some(([id, on]) => on && !J.MEDIA_TECH[id]?.stage)) settings.enabled.drift = true;
+  return settings;
+};
+const candidates = J.themeCandidates;
+J.themeCandidates = (project, key) => {
+  const pool = candidates(project, key);
+  if (!active(project) || !pool) return pool;
+  return {...pool,
+    lyrics: Object.fromEntries(Object.entries(pool.lyrics).map(([group, ids]) => [group, ids.filter(id => allowed(project, group, id))])),
+    media: pool.media.filter(id => allowed(project, 'media', id))};
+};
+const ids = J.themeIds;
+J.themeIds = project => ids(project).filter(id => J.quizForest.themeAllowed(project, id));
+const colorActive = J.colorThemeActive;
+J.colorThemeActive = project => active(project) || colorActive(project);
+const themedPalette = J.themedPalette;
+J.themedPalette = (project, style, rnd, current) => active(project) ? colors(rnd) : themedPalette(project, style, rnd, current);
+// The existing randomizer still does all planning. QF only chooses a gentle mood
+// and clips its output settings to the opt-in palette/candidate policy.
+const omakase = J.omakase;
+J.omakase = (project, rnd = Math.random, choices = {}) => {
+  const result = omakase(project, rnd, active(project) ? {...choices, mood: 'pop'} : choices);
+  if (!active(project)) return result;
+  for (const [group, entries] of Object.entries(result.enabled))
+    for (const id of Object.keys(entries)) if (!allowed(project, group, id)) entries[id] = false;
+  result.fx = softFx(result.fx); result.colors = colors(rnd);
+  for (const layer of ['media', 'foreground']) if (result[layer]) result[layer].effects = restrictMedia(project, result[layer].effects);
+  return result;
+};
+// Settings-only presets carry the mode just as complete project files do;
+// the file format, parser and binary writer themselves are not changed.
+const projectSettings = J.projectSettings;
+J.projectSettings = project => {
+  const result = projectSettings(project);
+  if (active(project)) {
+    result.quizForestMode = true;
+    if (project.quizForestPrevious) result.quizForestPrevious = clone(project.quizForestPrevious);
+  }
+  return result;
+};
+const applySettings = J.applyProjectSettings;
+J.applyProjectSettings = (current, source) => {
+  const result = applySettings(current, source);
+  if (active(source)) {
+    result.quizForestMode = true;
+    if (source.quizForestPrevious) result.quizForestPrevious = clone(source.quizForestPrevious);
+    else delete result.quizForestPrevious;
+  } else { delete result.quizForestMode; delete result.quizForestPrevious; }
+  return result;
+};
+})();
+
 /* English labels are applied after all expression packs register, before the editor starts.
    Internal IDs and project JSON remain language independent. */
 (() => {
@@ -43288,9 +43428,9 @@ function openCutDetails(layer,index,part=0) {
       const select=(key,groups)=>{const el=document.createElement('select');el.dataset.maskMotion=key;el.add(new Option(L('None','None'),'none'));
         for(const [name,items] of groups){const g=document.createElement('optgroup');g.label=name;for(const [id,def] of items)g.append(new Option(def.name,id));el.append(g);}
         el.value=m[key];el.addEventListener('change',()=>{m[key]=el.value;save();});return el;};
-      row(L('手法','Technique'),select('technique',J.MASK_MOTION_GROUPS.map(group=>[MEDIA_EFFECT_GROUPS[group],Object.entries(J.MEDIA_TECH).filter(([,d])=>!d.stage&&d.group===group)])));
-      row(L('Entrance','Entrance'),select('entrance',[[MEDIA_EFFECT_GROUPS.enter,J.mediaPhaseOptions('enter')]]));
-      row(L('Exit','Exit'),select('departure',[[MEDIA_EFFECT_GROUPS.exit,J.mediaPhaseOptions('exit')]]));
+      row(L('手法','Technique'),select('technique',J.MASK_MOTION_GROUPS.map(group=>[MEDIA_EFFECT_GROUPS[group],Object.entries(J.MEDIA_TECH).filter(([id,d])=>!d.stage&&d.group===group&&J.quizForest.allowed(S.project,'media',id))])));
+      row(L('Entrance','Entrance'),select('entrance',[[MEDIA_EFFECT_GROUPS.enter,J.mediaPhaseOptions('enter').filter(([id])=>J.quizForest.allowed(S.project,'media',id))]]));
+      row(L('Exit','Exit'),select('departure',[[MEDIA_EFFECT_GROUPS.exit,J.mediaPhaseOptions('exit').filter(([id])=>J.quizForest.allowed(S.project,'media',id))]]));
       for(const [key,ja,en,min,max] of [['amount','Motion strength','Motion intensity',0,2],['duration','Entrance · Exit時間（s）','Entrance / exit (s)',.05,1.5]]){
         const input=document.createElement('input');input.type='number';input.step='any';input.min=min;input.max=max;input.value=m[key];input.dataset.maskMotion=key;
         input.addEventListener('change',()=>{const v=Number(input.value);if(!Number.isFinite(v))return;m[key]=J.clamp(v,min,max);input.value=m[key];save();});row(L(ja,en),input);
@@ -43389,16 +43529,16 @@ function openCutDetails(layer,index,part=0) {
     if(field==='blend') return ['normal','multiply','screen','overlay'].map((v,i)=>[v,[L('通常','Normal'),L('乗算','Multiply'),L('スクリーン','Screen'),L('オーバーレイ','Overlay')][i]]);
     if(field==='itemId') return [['',L('No image','No image')],...J.mediaCopyItems(layer).map(a=>[a.id,a.name]),...S.project[layer].items.map(a=>[a.id,a.name])];
     if(field==='scheme') return S.plan.style.schemes.map((_,i)=>[String(i),String(i+1)]);
-    if(field==='technique') return [['',L('Auto','Auto')],['none',L('Effects無し','No effects')],...Object.entries(J.MEDIA_TECH).filter(([id,d])=>!d.stage&&J.mediaTechAllowed(id,layer)).map(([id,d])=>[id,d.name])];
-    if(field==='entrance'||field==='departure') return [['',L('Auto','Auto')],['none',L('Instant（None）','Instant (none)')],...J.mediaPhaseOptions(field==='entrance'?'enter':'exit').map(([id,d])=>[id,d.name])];
+    if(field==='technique') return [['',L('Auto','Auto')],['none',L('Effects無し','No effects')],...Object.entries(J.MEDIA_TECH).filter(([id,d])=>!d.stage&&J.mediaTechAllowed(id,layer) && J.quizForest.allowed(S.project, 'media', id)).map(([id,d])=>[id,d.name])];
+    if(field==='entrance'||field==='departure') return [['',L('Auto','Auto')],['none',L('Instant（None）','Instant (none)')],...J.mediaPhaseOptions(field==='entrance'?'enter':'exit').filter(([id])=>J.quizForest.allowed(S.project,'media',id)).map(([id,d])=>[id,d.name])];
     if(!lyric && ['layout','enter','exit','hold','treat'].includes(field)) {
       const registry=J['MEDIA_'+field.toUpperCase()] || {}, entries=Object.entries(registry).map(([id,d])=>[id,typeof d==='string'?d:d.name||id]);
       for(const def of Object.values(J.MEDIA_TECH)) if(def[field]&&!entries.some(([id])=>id===def[field])) entries.push([def[field],def.name+' / '+def[field]]);
       if(['enter','exit'].includes(field))for(const def of Object.values(J.MEDIA_TECH))if(def.stage===field&&def.motion&&!entries.some(([id])=>id===def.motion))entries.push([def.motion,def.name]);
-      return entries;
+      return J.quizForest.active(S.project) ? entries.filter(([id]) => Object.entries(J.MEDIA_TECH).some(([key, def]) => (def[field] === id || def.stage === field && def.motion === id) && J.quizForest.allowed(S.project, 'media', key))) : entries;
     }
     const reg={layout:J.LAYOUTS,enter:J.ENTER,hold:J.HOLD,exit:J.EXIT,treat:J.TREAT,bg:J.BG,cam:J.CAMERA,trans:J.TRANS,font:J.FONTS,id:J.DECOR}[field];
-    return reg ? [...(field==='trans'?[['none',L('None','None')],...(!lyric?[['crossfade',L('Crossfade','Crossfade')]]:[])]:[]),...Object.entries(reg).map(([id,d])=>[id,d.name||id])] : null;
+    return reg ? [...(field==='trans'?[['none',L('None','None')],...(!lyric?[['crossfade',L('Crossfade','Crossfade')]]:[])]:[]),...Object.entries(reg).filter(([id])=>J.quizForest.allowed(S.project, field==='id'?'decor':field, id)).map(([id,d])=>[id,d.name||id])] : null;
   }
   function choicePool(path){
     if(/^decor\.\d+\.id$/.test(path))return {kind:lyric?'lyric':'decor',group:'decor'};
@@ -44318,7 +44458,7 @@ function reconcileLyricLines(previous, next) {
 function renderLines() {
   const ol = $('lineList'); ol.innerHTML = ''; S.lineEls = []; S.curLine = -2;
   const ov = S.project.overrides;
-  const layoutOpts = '<option value="">Auto</option>' + J.LAYOUT_ORDER.map(k => `<option value="${k}">${J.LAYOUTS[k].name}</option>`).join('');
+  const layoutOpts = '<option value="">Auto</option>' + J.LAYOUT_ORDER.filter(k => J.quizForest.allowed(S.project, 'layout', k)).map(k => `<option value="${k}">${J.LAYOUTS[k].name}</option>`).join('');
   const rows = S.plan.lines.map(ln => ({ line: ln.index, start: ln.start }));
   rows.forEach(row => {
     const i = row.line, ln = S.plan.lines[i];
@@ -45001,10 +45141,10 @@ const MEDIA_EFFECT_GROUPS = {
 function renderMediaLines() {
   const layer = activeMediaLayer() || 'media', m = S.project[layer];
   const ol = $('mediaLineList'); ol.innerHTML = ''; S.mediaLineEls = [];
-  const selectTechnique = (ov, cut) => `<select class="media-technique" aria-label="${J.mediaLabel('画像 · 動画の手法', 'Media technique')}"><option value="none" ${(ov.technique === 'none' || ov.technique === undefined && cut.technique === 'none') ? 'selected' : ''}>${J.mediaLabel('Effects無し', 'No effects')}</option><option value="" ${ov.technique === null ? 'selected' : ''}>${J.mediaLabel('Auto', 'Auto')}</option>${cut.technique === 'legacy' ? `<option value="legacy" selected>${J.mediaLabel('従来の設定', 'Legacy settings')}</option>` : ''}${J.MEDIA_TECH[cut.technique]?.stage ? `<option value="${cut.technique}" selected>${J.mediaTechniqueName(cut)} (${J.mediaLabel('従来の設定', 'Legacy settings')})</option>` : ''}${Object.entries(MEDIA_EFFECT_GROUPS).filter(([group]) => !['enter', 'exit'].includes(group) && Object.entries(J.MEDIA_TECH).some(([key, def]) => def.group === group && J.mediaTechAllowed(key, layer))).map(([group, name]) => `<optgroup label="${name}">${Object.entries(J.MEDIA_TECH).filter(([key, def]) => def.group === group && !def.stage && J.mediaTechAllowed(key, layer)).map(([key, def]) => `<option value="${key}" ${ov.technique === key ? 'selected' : ''}>${escapeHtml(def.name)}</option>`).join('')}</optgroup>`).join('')}</select>`;
+  const selectTechnique = (ov, cut) => `<select class="media-technique" aria-label="${J.mediaLabel('画像 · 動画の手法', 'Media technique')}"><option value="none" ${(ov.technique === 'none' || ov.technique === undefined && cut.technique === 'none') ? 'selected' : ''}>${J.mediaLabel('Effects無し', 'No effects')}</option><option value="" ${ov.technique === null ? 'selected' : ''}>${J.mediaLabel('Auto', 'Auto')}</option>${cut.technique === 'legacy' ? `<option value="legacy" selected>${J.mediaLabel('従来の設定', 'Legacy settings')}</option>` : ''}${J.MEDIA_TECH[cut.technique]?.stage ? `<option value="${cut.technique}" selected>${J.mediaTechniqueName(cut)} (${J.mediaLabel('従来の設定', 'Legacy settings')})</option>` : ''}${Object.entries(MEDIA_EFFECT_GROUPS).filter(([group]) => !['enter', 'exit'].includes(group) && Object.entries(J.MEDIA_TECH).some(([key, def]) => def.group === group && J.mediaTechAllowed(key, layer) && J.quizForest.allowed(S.project, 'media', key))).map(([group, name]) => `<optgroup label="${name}">${Object.entries(J.MEDIA_TECH).filter(([key, def]) => def.group === group && !def.stage && J.mediaTechAllowed(key, layer) && J.quizForest.allowed(S.project, 'media', key)).map(([key, def]) => `<option value="${key}" ${ov.technique === key ? 'selected' : ''}>${escapeHtml(def.name)}</option>`).join('')}</optgroup>`).join('')}</select>`;
   const selectPhase = (ov, cut, stage, field) => {
     const value = ov[field] ?? '', title = MEDIA_EFFECT_GROUPS[stage];
-    return `<label>${title}<select class="media-phase" data-media-phase="${field}" aria-label="${title}"><option value="" ${!value ? 'selected' : ''}>${J.mediaLabel('Auto', 'Auto')}</option><option value="none" ${value === 'none' ? 'selected' : ''}>${J.mediaLabel('Instant（None）', 'Instant (none)')}</option>${J.mediaPhaseOptions(stage).map(([key, def]) => `<option value="${key}" ${value === key ? 'selected' : ''}>${escapeHtml(def.name)}</option>`).join('')}</select></label>`;
+    return `<label>${title}<select class="media-phase" data-media-phase="${field}" aria-label="${title}"><option value="" ${!value ? 'selected' : ''}>${J.mediaLabel('Auto', 'Auto')}</option><option value="none" ${value === 'none' ? 'selected' : ''}>${J.mediaLabel('Instant（None）', 'Instant (none)')}</option>${J.mediaPhaseOptions(stage).filter(([key])=>J.quizForest.allowed(S.project,'media',key)).map(([key, def]) => `<option value="${key}" ${value === key ? 'selected' : ''}>${escapeHtml(def.name)}</option>`).join('')}</select></label>`;
 
   };
   const addButton = index => {
@@ -45102,12 +45242,13 @@ function drawStyleGrid() {
       const b = document.createElement('button'); b.className = 'stile'; b.dataset.k = k;
       b.title = J.STYLES[k].desc;
       b.innerHTML = `<canvas width="192" height="108"></canvas><span>${J.STYLES[k].name}</span><span class="badges">${setBadges(J.STYLES[k])}</span>`;
-      b.addEventListener('click', () => { remember(); S.project.style = k; S.project.colors.enabled = false; syncUI(); replan(); commit(); });
+      b.addEventListener('click', () => { remember(); S.project.style = k; if (J.quizForest.active(S.project)) S.project.colors = J.quizForest.colors(); else S.project.colors.enabled = false; syncUI(); replan(); commit(); });
       g.appendChild(b);
     });
   }
   [...g.children].forEach(b => {
-    const k = b.dataset.k, st = J.STYLES[k], sc = st.schemes[0], cv = b.querySelector('canvas'), x = cv.getContext('2d');
+    const k = b.dataset.k, st = J.STYLES[k], sc = J.quizForest.active(S.project) ? J.quizForest.colors() : st.schemes[0], cv = b.querySelector('canvas'), x = cv.getContext('2d');
+    b.hidden = !J.quizForest.allowed(S.project, 'style', k);
     b.setAttribute('aria-pressed', S.project.style === k ? 'true' : 'false');
     const off = !J.randomOk(S.project, 'style', k);
     b.classList.toggle('set-off', off);
@@ -45203,7 +45344,7 @@ function randomPalette() {
 
 /* ---------------- history of looks (◀ ▶) ---------------- */
 // only the "look" is tracked — lyrics, timing and output settings are never rolled back
-const HKEYS = ['style', 'mood', 'seed', 'fx', 'enabled', 'fonts', 'colors', 'overrides'];
+const HKEYS = ['style', 'mood', 'seed', 'fx', 'enabled', 'fonts', 'colors', 'overrides', 'quizForestMode', 'quizForestPrevious'];
 const H = { list: [], i: -1 };
 const lookSnap = () => {
   // Undo/import fills in missing enabled keys. Normalize them here too so that
@@ -45249,7 +45390,7 @@ function rerollPart(part) {
     let pool = J.STYLE_ORDER.filter(k => k !== P.style && J.randomOk(P, 'style', k));
     if (!pool.length) pool = J.STYLE_ORDER.filter(k => k !== P.style);
     P.style = pool[Math.floor(Math.random() * pool.length)];
-    P.colors.enabled = false;
+    if (J.quizForest.active(P)) P.colors = J.quizForest.colors(); else P.colors.enabled = false;
     msg = `Style：${J.STYLES[P.style].name}`;
   } else if (part === 'mood') {
     const r = J.omakase(P);
@@ -45378,7 +45519,7 @@ function setMode(m) {
 const FX = [['motion', 'Motion strength'], ['glitch', 'Glitch'], ['chroma', 'Color offset'], ['decor', 'Decoration amount'], ['density', 'Cut density'], ['texture', 'Texture'], ['bgSwitch', 'Background changes']];
 function renderFx() {
   const box = $('fxSliders'); box.innerHTML = '';
-  FX.forEach(([k, label]) => {
+  FX.filter(([k]) => !J.quizForest.active(S.project) || !['glitch', 'chroma'].includes(k)).forEach(([k, label]) => {
     const row = document.createElement('div'); row.className = 'slider';
     const v = S.project.fx[k] ?? 0.5;
     row.innerHTML = `<label for="fx_${k}">${label}</label><input id="fx_${k}" type="range" min="0" max="1" step="0.01" value="${v}"><output>${Math.round(v * 100)}</output>`;
@@ -45387,6 +45528,7 @@ function renderFx() {
     box.appendChild(row);
   });
   $('fxFlash').checked = !!S.project.fx.flash;
+  $('fxFlash').disabled = J.quizForest.active(S.project);
   $('fxKoma').value = String(J.komaOf(S.project.fx));
   $('fxHud').value = S.project.fx.hud || 'auto';
   $('seed').value = S.project.seed;
@@ -45395,7 +45537,7 @@ function renderFx() {
 /* ---------------- techniques in the lyrics tab ---------------- */
 const GROUPS = [['layout', 'Layout'], ['enter', 'Entrance'], ['hold', 'Hold'], ['exit', 'Exit'], ['decor', 'Decoration'], ['treat', 'Text treatments'], ['bg', 'Background'], ['cam', 'Camera'], ['fx', 'Screen effects'], ['trans', 'Transitions']];
 const openGroups = new Set();
-function techItems(g) { return J.order(g).filter(k => J.registry(g)[k] && !J.registry(g)[k].special); }
+function techItems(g) { return J.order(g).filter(k => J.registry(g)[k] && !J.registry(g)[k].special && J.quizForest.allowed(S.project, g, k)); }
 function renderTech() {
   const lyricEffects = J.lyricEffectSettings(S.project);
   $('lyricAutoPlacement').checked = lyricEffects.autoPlacement;
@@ -45889,7 +46031,7 @@ function renderMediaEffects(layer) {
   box.appendChild(searchRow);
   const groups = MEDIA_EFFECT_GROUPS;
   for (const [group, name] of Object.entries(groups)) {
-    const items = Object.entries(J.MEDIA_TECH).filter(([key, def]) => def.group === group && J.mediaTechAllowed(key, layer));
+    const items = Object.entries(J.MEDIA_TECH).filter(([key, def]) => def.group === group && J.mediaTechAllowed(key, layer) && J.quizForest.allowed(S.project, 'media', key));
     const shown=items.filter(([key,def])=>matches(def.name+' '+key));
     if (!shown.length) continue;
     const count = enabled => `${items.filter(([key]) => enabled[key] !== false).length}/${items.length}`;
@@ -45918,7 +46060,7 @@ function renderMediaEffects(layer) {
   }
   {
     // Decorations for this layer, laid out like the technique groups; used when "Enable decorations" is on.
-    const items = J.order('decor').filter(key => J.DECOR[key]).map(key => [key, J.DECOR[key]]);
+    const items = J.order('decor').filter(key => J.DECOR[key] && J.quizForest.allowed(S.project, 'decor', key)).map(key => [key, J.DECOR[key]]);
     const shown=items.filter(([key,def])=>matches(def.name+' '+key));
     const count = s => `${items.filter(([key]) => J.mediaDecorOn(s, key)).length}/${items.length}`;
     const section = document.createElement('details'); section.className = 'tgroup media-tech-group'; section.dataset.mediaGroup = 'decor';
@@ -45965,20 +46107,28 @@ function renderMediaEffects(layer) {
     box.prepend(row);
   }
   action('shuffle').onclick = () => { shuffleMediaEffects([layer]); S.project[layer].seed++; replan(); };
-  const all = value => { const next = J.mediaEffectSettings(S.project, layer); next.enabled = Object.fromEntries(Object.keys(J.MEDIA_TECH).filter(key => J.mediaTechAllowed(key, layer)).map(key => [key, value])); S.project[layer].effects = next; renderMediaEffects(layer); replan(); };
+  const all = value => { const next = J.mediaEffectSettings(S.project, layer); next.enabled = Object.fromEntries(Object.keys(J.MEDIA_TECH).filter(key => J.mediaTechAllowed(key, layer) && J.quizForest.allowed(S.project, 'media', key)).map(key => [key, value])); S.project[layer].effects = next; renderMediaEffects(layer); replan(); };
   action('enable').onclick = () => all(true); action('disable').onclick = () => all(false);
   if(searchFocused){search.focus({preventScroll:true});search.setSelectionRange(...selection);}
 }
 
 /* ---------------- sync all inputs from project ---------------- */
 function renderThemes() {
+  const qf = J.quizForest.active(S.project);
+  $('btnQuizForest').setAttribute('aria-pressed', String(qf));
+  $('btnQuizForestOff').hidden = !qf;
+  $('btnQuizForestOff').textContent = J.mediaLabel('通常モード', 'Normal mode');
   const ids = J.themeIds(S.project), ct = J.normalizeColorTheme(S.project.colorTheme);
   $('themeLabels').innerHTML = ids.length ? ids.map(id=>`<span class="theme-label">${J.THEMES[id].name}</span>`).join('') : `<span class="muted">${J.mediaLabel('未選択：すべてのテーマ','Not selected: unrestricted')}</span>`;
+  if (qf) {
+    const chip = document.createElement('span'); chip.className = 'theme-label'; chip.textContent = 'Quiz Forest';
+    chip.title = Object.values(J.quizForest.palette).join(' / '); $('themeLabels').prepend(chip);
+  }
   if (S.project.themeBalance === 'unified') {
     const chip = document.createElement('span'); chip.className = 'theme-label'; chip.textContent = J.mediaLabel('統一感重視', 'Unified look');
     $('themeLabels').prepend(chip);
   }
-  if (J.colorThemeActive(S.project)) {
+  if (!qf && J.colorThemeActive(S.project)) {
     const chip = document.createElement('span'); chip.className = 'theme-label theme-color-label';
     chip.textContent = J.mediaLabel('カラー：','Colour: ') + (ct.genre !== 'auto' ? J.COLOR_GENRES[ct.genre].name : '');
     if (ct.color) { const dot = document.createElement('i'); dot.style.background = ct.color; dot.title = ct.color; chip.append(dot); }
@@ -46098,11 +46248,20 @@ function bind() {
       : L('標準の挙動です。おまかせは幅広いEffectsを候補に入れ、cutsごとに変化のあるにぎやかな見た目にします。', 'The standard behaviour. Randomize draws on a wide range of effects and varies them from cut to cut for a lively look.');
   };
   document.querySelectorAll('#themesDlg input[name=themeBalance]').forEach(input => input.addEventListener('change', themeBalanceNote));
+  const applyQuizForest = enabled => {
+    if (S.exporting || S.tap) return;
+    remember();
+    if (enabled) J.quizForest.activate(S.project); else J.quizForest.deactivate(S.project);
+    fontKey = ''; syncUI(); replan(); commit();
+    toast(enabled ? 'Quiz Forest' : J.mediaLabel('通常モード', 'Normal mode'));
+  };
+  $('btnQuizForest').addEventListener('click', () => applyQuizForest(true));
+  $('btnQuizForestOff').addEventListener('click', () => applyQuizForest(false));
   $('btnThemes').addEventListener('click', () => {
     const selected = new Set(J.themeIds(S.project));
     document.querySelector(`#themesDlg input[name=themeBalance][value=${S.project.themeBalance === 'unified' ? 'unified' : 'lively'}]`).checked = true;
     themeBalanceNote();
-    $('themeChoices').innerHTML = ['genre','taste'].map(category => `<fieldset><legend>${J.mediaLabel(category === 'genre' ? '曲ジャンル' : 'テイスト',category === 'genre' ? 'Music genre' : 'Taste')}</legend>${Object.entries(J.THEMES).filter(([,t])=>t.category===category).map(([id,t])=>`<label class="check"><input type="checkbox" data-theme="${id}" ${selected.has(id)?'checked':''}><span>${t.name}<small>${t.description}</small></span></label>`).join('')}</fieldset>`).join('');
+    $('themeChoices').innerHTML = ['genre','taste'].map(category => `<fieldset><legend>${J.mediaLabel(category === 'genre' ? '曲ジャンル' : 'テイスト',category === 'genre' ? 'Music genre' : 'Taste')}</legend>${Object.entries(J.THEMES).filter(([id,t])=>t.category===category&&J.quizForest.themeAllowed(S.project,id)).map(([id,t])=>`<label class="check"><input type="checkbox" data-theme="${id}" ${selected.has(id)?'checked':''}><span>${t.name}<small>${t.description}</small></span></label>`).join('')}</fieldset>`).join('');
     // Colour: a genre and one theme colour for random palettes, taking priority over the themes above.
     const ct = J.normalizeColorTheme(S.project.colorTheme), L = J.mediaLabel, colors = document.createElement('fieldset'); colors.className = 'theme-colors';
     colors.innerHTML = `<legend>${L('カラー','Colour')}</legend><p class="note">${L('RandomPalette（おまかせ · 「Palette」ボタン）に使います。曲ジャンル · テイストによるPaletteより優先されます。','Used by random palettes (Randomize and the Colours button), taking priority over music-genre and taste themes.')}</p><label class="theme-color-row"><span>${L('Paletteジャンル','Colour genre')}</span><select id="colorGenre"></select></label><small id="colorGenreNote" class="muted"></small><label class="check"><input type="checkbox" id="colorThemeOn"><span>${L('テーマカラーを使う','Use a theme colour')}<small>${L('この色をAccentにして、他の色を合わせます。','Uses this colour as the accent and matches the other colours to it.')}</small></span></label><label class="theme-color-row"><span>${L('テーマカラー','Theme colour')}</span><input type="color" id="colorThemeColor"></label>`;
@@ -46114,6 +46273,11 @@ function bind() {
     colors.querySelector('#colorThemeOn').checked = !!ct.color;
     colors.querySelector('#colorThemeColor').value = (ct.color || '#FF4F8B').toLowerCase();
     colors.querySelector('#colorThemeColor').addEventListener('input', () => { colors.querySelector('#colorThemeOn').checked = true; });
+    if (J.quizForest.active(S.project)) {
+      colors.querySelector('p.note').textContent = J.mediaLabel('Quiz Forestの8色を優先します。通常モードで他のPaletteに切り替えられます。', 'Quiz Forest prioritizes its eight colours. Switch to Normal mode to use other palettes.');
+      colors.querySelectorAll('input,select').forEach(input => input.disabled = true);
+      colors.insertAdjacentHTML('beforeend', `<div class="swatches" aria-label="Quiz Forest palette">${swatchHTML(Object.values(J.quizForest.palette))}</div>`);
+    }
     $('themeChoices').append(colors);
     $('themesDlg').showModal();
   });
